@@ -3,8 +3,10 @@ package core
 import (
 	"bytes"
 	"fmt"
+	"github.com/google/uuid"
 	"os/exec"
 	"strings"
+	"sync"
 )
 
 type Job struct {
@@ -15,8 +17,18 @@ type Job struct {
 	cmdObj *exec.Cmd
 }
 
+type JobStatus struct {
+	Job      Job
+	ExitCode int
+	ErrorMsg string
+}
+
 func (j Job) ToString() string {
 	return fmt.Sprintf("ID: %s, Cmd: %s, User: %s, State: %s", j.ID, j.Cmd, j.User, j.State)
+}
+
+func (js JobStatus) ToString() string {
+	return fmt.Sprintf("Job: %s, ExitCode: %d, ErrorMsg: %s", js.Job.ToString(), js.ExitCode, js.ErrorMsg)
 }
 
 const (
@@ -27,27 +39,49 @@ const (
 
 type JobDispatcher struct {
 	// map of job id to job initialized as empty
-	jobs map[string]Job
+	jobs        map[string]Job       // contain job info
+	JobStatuses map[string]JobStatus // contain job info and exit status
+	lock        sync.RWMutex         // read write lock
+}
+
+func NewJobDispatcher() JobDispatcher {
+	jd := JobDispatcher{}
+	jd.Init()
+	return jd
 }
 
 func (jd *JobDispatcher) Init() {
 	jd.jobs = make(map[string]Job)
+	jd.JobStatuses = make(map[string]JobStatus)
+	// lru
 }
 
-func (jd *JobDispatcher) ListJobs() []string {
-	jobs := make([]string, len(jd.jobs))
-	for _, job := range jd.jobs {
-		jobs = append(jobs, job.ToString())
+func validateJobId(jobId string) error {
+	if _, err := uuid.Parse(jobId); err != nil {
+		return err
+	}
+	return nil
+}
+
+// list all jobs
+func (jd *JobDispatcher) ListJobs() []JobStatus {
+	jd.lock.RLock()
+	defer jd.lock.RUnlock()
+	jobs := make([]JobStatus, 0)
+	for _, job := range jd.JobStatuses {
+		jobs = append(jobs, job)
 	}
 	return jobs
 }
 
 func (jd *JobDispatcher) StopJob(jobId string) string {
-	job := jd.jobs[jobId]
 	// if job is not found, print a message and return
-	if job.ID == "" {
-		return "Job not found"
+	if err := validateJobId(jobId); err != nil {
+		return "Invalid job ID"
 	}
+	jd.lock.Lock()
+	job := jd.jobs[jobId]
+	jd.lock.Unlock()
 	if job.State == Running {
 		// Check if cmdObj is not nil and has a valid process
 		if job.cmdObj != nil && job.cmdObj.Process != nil {
@@ -58,6 +92,10 @@ func (jd *JobDispatcher) StopJob(jobId string) string {
 				return "Failed to kill the process:"
 			}
 			job.State = Finished
+			jd.lock.Lock()
+			jd.jobs[jobId] = job
+			jd.JobStatuses[jobId] = JobStatus{Job: job, ExitCode: 1, ErrorMsg: "signal: killed"} // e.g. sleep 50 && pwd
+			jd.lock.Unlock()
 		} else {
 			return "No process to kill or command was not started"
 		}
@@ -67,22 +105,27 @@ func (jd *JobDispatcher) StopJob(jobId string) string {
 	}
 }
 
-func (jd *JobDispatcher) QueryJob(jobId string) string {
-	job := jd.jobs[jobId]
-	if job.ID == "" {
-		return "Job not found"
+func (jd *JobDispatcher) QueryJob(jobId string) JobStatus {
+	jd.lock.RLock()
+	defer jd.lock.RUnlock()
+	// if job is not found, print a message and return
+	if err := validateJobId(jobId); err != nil {
+		return JobStatus{Job: Job{ID: jobId}, ExitCode: -1, ErrorMsg: "Invalid job ID"}
 	}
-	return job.ToString()
+	jobStatus := jd.JobStatuses[jobId]
+	println("Querying job:", jobStatus.ToString())
+	return jobStatus
 }
 
 func (jd *JobDispatcher) StartJob(job Job) string {
-	jd.jobs[job.ID] = job
+
 	job.State = Running
-
-	cmdObj := exec.Command("sh", "-c", job.Cmd)
+	cmdObj := exec.Command("sh", "-c", job.Cmd) // Create a new command object, prepare to run the command
 	job.cmdObj = cmdObj
+	jd.lock.Lock()
 	jd.jobs[job.ID] = job
-
+	jd.JobStatuses[job.ID] = JobStatus{Job: job, ExitCode: -1, ErrorMsg: ""}
+	jd.lock.Unlock()
 	// 将io输入重定向到缓冲区
 	var outBuf bytes.Buffer
 	cmdObj.Stdout = &outBuf // 将io输入重定向到缓冲区
@@ -91,17 +134,28 @@ func (jd *JobDispatcher) StartJob(job Job) string {
 	err := cmdObj.Start()
 	if err != nil {
 		job.State = Finished
+		jd.lock.Lock()
 		jd.jobs[job.ID] = job
+		jd.JobStatuses[job.ID] = JobStatus{Job: job, ExitCode: 1, ErrorMsg: err.Error()}
+		jd.lock.Unlock()
 		return "Failed to start job:"
 	}
-
 	// Run the command in a goroutine
 	err = cmdObj.Wait() // Wait for the command to finish
 	if err != nil {
+		job.State = Finished
+		jd.lock.Lock()
+		jd.jobs[job.ID] = job
+		jd.JobStatuses[job.ID] = JobStatus{Job: job, ExitCode: 1, ErrorMsg: err.Error()} // e.g. sleep 50
+		jd.lock.Unlock()
 		return "Job finished with error:" + err.Error()
 	} else {
 		job.State = Finished
+		jd.lock.Lock()
 		jd.jobs[job.ID] = job
+		jd.JobStatuses[job.ID] = JobStatus{Job: job, ExitCode: 0, ErrorMsg: ""}
+		jd.lock.Unlock()
+		println(strings.TrimSpace(outBuf.String()))
 		return strings.TrimSpace(outBuf.String())
 	}
 }

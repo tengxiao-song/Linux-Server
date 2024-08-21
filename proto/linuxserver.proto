@@ -1,0 +1,44 @@
+syntax = "proto3";
+
+option go_package = ".";
+
+service JobManager {
+  rpc Start(Job)         returns (Job)             {}
+
+  rpc Stop(JobID)                       returns (NilMessage)      {}
+
+  rpc Query(JobID)                      returns (JobStatus)       {}
+
+  rpc List(NilMessage)                  returns (JobStatusList)   {}
+
+  rpc Output(JobID)			    returns (JobOutput) {} // stream没学
+}
+
+message Job {
+// The server-assigned ID;
+    string ID = 1;
+    string cmd = 2;
+    string user = 3;
+    string State = 4;
+}
+
+message JobID {
+  string id = 1;
+}
+
+message JobStatus {
+  Job job = 1;
+  int32 exitCode = 2;
+  string errorMessage = 3;
+}
+
+message JobOutput {
+  bytes output = 1;
+}
+
+message NilMessage {}
+
+message JobStatusList {
+  repeated JobStatus jobStatusList  = 1; // array of jobstatus
+}
+
