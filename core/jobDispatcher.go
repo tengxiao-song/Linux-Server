@@ -18,7 +18,7 @@ type Job struct {
 }
 
 type JobStatus struct {
-	Job      Job
+	Job      *Job
 	ExitCode int
 	ErrorMsg string
 }
@@ -39,9 +39,9 @@ const (
 
 type JobDispatcher struct {
 	// map of job id to job initialized as empty
-	jobs        map[string]Job       // contain job info
-	JobStatuses map[string]JobStatus // contain job info and exit status
-	lock        sync.RWMutex         // read write lock
+	jobs        map[string]*Job       // contain job info
+	JobStatuses map[string]*JobStatus // contain job info and exit status
+	lock        sync.RWMutex          // read write lock
 }
 
 func NewJobDispatcher() JobDispatcher {
@@ -51,8 +51,8 @@ func NewJobDispatcher() JobDispatcher {
 }
 
 func (jd *JobDispatcher) Init() {
-	jd.jobs = make(map[string]Job)
-	jd.JobStatuses = make(map[string]JobStatus)
+	jd.jobs = make(map[string]*Job)
+	jd.JobStatuses = make(map[string]*JobStatus)
 	// lru
 }
 
@@ -69,7 +69,7 @@ func (jd *JobDispatcher) ListJobs() []JobStatus {
 	defer jd.lock.RUnlock()
 	jobs := make([]JobStatus, 0)
 	for _, job := range jd.JobStatuses {
-		jobs = append(jobs, job)
+		jobs = append(jobs, *job)
 	}
 	return jobs
 }
@@ -86,15 +86,16 @@ func (jd *JobDispatcher) StopJob(jobId string) string {
 		// Check if cmdObj is not nil and has a valid process
 		if job.cmdObj != nil && job.cmdObj.Process != nil {
 			// Attempt to kill the process
+			jd.lock.Lock()
 			err := job.cmdObj.Process.Kill()
 			println("killing process")
 			if err != nil {
 				return "Failed to kill the process:"
 			}
 			job.State = Finished
-			jd.lock.Lock()
-			jd.jobs[jobId] = job
-			jd.JobStatuses[jobId] = JobStatus{Job: job, ExitCode: 1, ErrorMsg: "signal: killed"} // e.g. sleep 50 && pwd
+			jobStatus := jd.JobStatuses[jobId]
+			jobStatus.ExitCode = 1
+			jobStatus.ErrorMsg = "signal: killed" // e.g. sleep 50 && pwd
 			jd.lock.Unlock()
 		} else {
 			return "No process to kill or command was not started"
@@ -110,21 +111,23 @@ func (jd *JobDispatcher) QueryJob(jobId string) JobStatus {
 	defer jd.lock.RUnlock()
 	// if job is not found, print a message and return
 	if err := validateJobId(jobId); err != nil {
-		return JobStatus{Job: Job{ID: jobId}, ExitCode: -1, ErrorMsg: "Invalid job ID"}
+		return JobStatus{Job: &Job{ID: jobId}, ExitCode: -1, ErrorMsg: "Invalid job ID"}
 	}
 	jobStatus := jd.JobStatuses[jobId]
-	println("Querying job:", jobStatus.ToString())
-	return jobStatus
+	if jobStatus == nil {
+		return JobStatus{Job: &Job{ID: jobId}, ExitCode: -1, ErrorMsg: "Job not found"}
+	}
+	return *jobStatus
 }
 
 func (jd *JobDispatcher) StartJob(job Job) string {
-
+	jd.lock.Lock()
 	job.State = Running
 	cmdObj := exec.Command("sh", "-c", job.Cmd) // Create a new command object, prepare to run the command
 	job.cmdObj = cmdObj
-	jd.lock.Lock()
-	jd.jobs[job.ID] = job
-	jd.JobStatuses[job.ID] = JobStatus{Job: job, ExitCode: -1, ErrorMsg: ""}
+	jd.jobs[job.ID] = &job
+	jobStatus := JobStatus{Job: &job, ExitCode: -1, ErrorMsg: ""}
+	jd.JobStatuses[job.ID] = &jobStatus
 	jd.lock.Unlock()
 	// 将io输入重定向到缓冲区
 	var outBuf bytes.Buffer
@@ -133,27 +136,27 @@ func (jd *JobDispatcher) StartJob(job Job) string {
 	// Start the command (non-blocking)
 	err := cmdObj.Start()
 	if err != nil {
-		job.State = Finished
 		jd.lock.Lock()
-		jd.jobs[job.ID] = job
-		jd.JobStatuses[job.ID] = JobStatus{Job: job, ExitCode: 1, ErrorMsg: err.Error()}
+		job.State = Finished
+		jobStatus.ExitCode = 1
+		jobStatus.ErrorMsg = err.Error()
 		jd.lock.Unlock()
 		return "Failed to start job:"
 	}
 	// Run the command in a goroutine
 	err = cmdObj.Wait() // Wait for the command to finish
 	if err != nil {
-		job.State = Finished
 		jd.lock.Lock()
-		jd.jobs[job.ID] = job
-		jd.JobStatuses[job.ID] = JobStatus{Job: job, ExitCode: 1, ErrorMsg: err.Error()} // e.g. sleep 50
+		job.State = Finished
+		jobStatus.ExitCode = 1
+		jobStatus.ErrorMsg = err.Error() // sleep 50
 		jd.lock.Unlock()
 		return "Job finished with error:" + err.Error()
 	} else {
-		job.State = Finished
 		jd.lock.Lock()
-		jd.jobs[job.ID] = job
-		jd.JobStatuses[job.ID] = JobStatus{Job: job, ExitCode: 0, ErrorMsg: ""}
+		job.State = Finished
+		jobStatus.ExitCode = 0
+		jobStatus.ErrorMsg = ""
 		jd.lock.Unlock()
 		println(strings.TrimSpace(outBuf.String()))
 		return strings.TrimSpace(outBuf.String())
