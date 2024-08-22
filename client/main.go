@@ -7,6 +7,7 @@ import (
 	"github.com/google/uuid"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"io"
 	core "main/core"
 	pb "main/proto"
 	"os"
@@ -62,6 +63,29 @@ func listJobs(c pb.JobManagerClient) {
 		fmt.Println("Exit code:", job.ExitCode)
 		fmt.Println("Error message:", job.ErrorMessage)
 	}
+}
+
+func streamJobs(c pb.JobManagerClient, jobID string) {
+	stream, err := c.StreamOutput(context.Background(), &pb.JobID{
+		Id: jobID,
+	})
+	if err != nil {
+		fmt.Println("Error streaming jobs:", err)
+		return
+	}
+	go func() {
+		for {
+			jobStatus, err := stream.Recv() // read data from the stream from the server
+			if err == io.EOF {
+				break
+			} else if err != nil {
+				fmt.Println("Error receiving job status:", err)
+				return
+			}
+			// print the response (current output)
+			fmt.Println(jobStatus.String())
+		}
+	}()
 }
 
 func main() {
@@ -127,6 +151,13 @@ func main() {
 			stopJob(client, jobID)
 		case "list":
 			listJobs(client)
+		case "stream":
+			if len(parts) < 2 {
+				fmt.Println("Invalid input. Please enter a job ID.")
+				continue
+			}
+			jobID := strings.TrimSpace(strings.Join(parts[1:], ""))
+			streamJobs(client, jobID)
 		default:
 			fmt.Println("Invalid command. Please enter a valid command.")
 		}

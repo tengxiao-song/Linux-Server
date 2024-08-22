@@ -1,9 +1,11 @@
 package core
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
 	"github.com/google/uuid"
+	"io"
 	"os/exec"
 	"strings"
 	"sync"
@@ -15,6 +17,7 @@ type Job struct {
 	User   string
 	State  string
 	cmdObj *exec.Cmd
+	buffer *bytes.Buffer
 }
 
 type JobStatus struct {
@@ -125,19 +128,21 @@ func (jd *JobDispatcher) StartJob(job Job) string {
 	job.State = Running
 	cmdObj := exec.Command("sh", "-c", job.Cmd) // Create a new command object, prepare to run the command
 	job.cmdObj = cmdObj
+	job.buffer = &bytes.Buffer{}
 	jd.jobs[job.ID] = &job
 	jobStatus := JobStatus{Job: &job, ExitCode: -1, ErrorMsg: ""}
 	jd.JobStatuses[job.ID] = &jobStatus
 	jd.lock.Unlock()
 	// 将io输入重定向到缓冲区
-	var outBuf bytes.Buffer
-	cmdObj.Stdout = &outBuf // 将io输入重定向到缓冲区
+	//var outBuf bytes.Buffer
+	cmdObj.Stdout = job.buffer // 将io输入重定向到缓冲区
 
 	// Start the command (non-blocking)
 	err := cmdObj.Start()
 	if err != nil {
 		jd.lock.Lock()
 		job.State = Finished
+		job.buffer.WriteString(err.Error() + "\n")
 		jobStatus.ExitCode = 1
 		jobStatus.ErrorMsg = err.Error()
 		jd.lock.Unlock()
@@ -148,6 +153,7 @@ func (jd *JobDispatcher) StartJob(job Job) string {
 	if err != nil {
 		jd.lock.Lock()
 		job.State = Finished
+		job.buffer.WriteString(err.Error() + "\n")
 		jobStatus.ExitCode = 1
 		jobStatus.ErrorMsg = err.Error() // sleep 50
 		jd.lock.Unlock()
@@ -158,7 +164,33 @@ func (jd *JobDispatcher) StartJob(job Job) string {
 		jobStatus.ExitCode = 0
 		jobStatus.ErrorMsg = ""
 		jd.lock.Unlock()
-		println(strings.TrimSpace(outBuf.String()))
-		return strings.TrimSpace(outBuf.String())
+		println(strings.TrimSpace(job.buffer.String()))
+		return strings.TrimSpace(job.buffer.String())
+	}
+}
+
+//func (j *Job) stream() io.Reader {
+//	return j.buffer
+//}
+
+func (jd *JobDispatcher) Output(jobId string, channel chan string) {
+	defer close(channel)
+	if err := validateJobId(jobId); err != nil {
+		return
+	}
+	job := jd.jobs[jobId]
+	if job == nil {
+		return
+	}
+	stream := bufio.NewReader(job.buffer)
+	for {
+		line, err := stream.ReadString('\n')
+		if err == io.EOF && job.State == Finished {
+			break
+		}
+		if line != "" {
+			line = line[:len(line)-1]
+			channel <- line // write data to channel, give to server
+		}
 	}
 }

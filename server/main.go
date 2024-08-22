@@ -72,6 +72,22 @@ func (s *server) List(ctx context.Context, in *pb.NilMessage) (*pb.JobStatusList
 	return &pb.JobStatusList{JobStatusList: pbJobStatusList}, nil
 }
 
+func (s *server) StreamOutput(in *pb.JobID, stream pb.JobManager_StreamOutputServer) error {
+	println("Received stream request")
+	//jobDispatcher.StreamOutput(in.Id, stream)
+	resultChan := make(chan string)
+	go jobDispatcher.Output(in.Id, resultChan)
+	for elem := range resultChan { // read data form core's channel
+		// make string to []byte
+		output := &pb.JobOutput{Output: []byte(elem)}
+		err := stream.Send(output) // send data to client
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func main() {
 	listen, _ := net.Listen("tcp", ":8080")
 	s := grpc.NewServer()

@@ -19,11 +19,11 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	JobManager_Start_FullMethodName  = "/JobManager/Start"
-	JobManager_Stop_FullMethodName   = "/JobManager/Stop"
-	JobManager_Query_FullMethodName  = "/JobManager/Query"
-	JobManager_List_FullMethodName   = "/JobManager/List"
-	JobManager_Output_FullMethodName = "/JobManager/Output"
+	JobManager_Start_FullMethodName        = "/JobManager/Start"
+	JobManager_Stop_FullMethodName         = "/JobManager/Stop"
+	JobManager_Query_FullMethodName        = "/JobManager/Query"
+	JobManager_List_FullMethodName         = "/JobManager/List"
+	JobManager_StreamOutput_FullMethodName = "/JobManager/StreamOutput"
 )
 
 // JobManagerClient is the client API for JobManager service.
@@ -34,7 +34,7 @@ type JobManagerClient interface {
 	Stop(ctx context.Context, in *JobID, opts ...grpc.CallOption) (*NilMessage, error)
 	Query(ctx context.Context, in *JobID, opts ...grpc.CallOption) (*JobStatus, error)
 	List(ctx context.Context, in *NilMessage, opts ...grpc.CallOption) (*JobStatusList, error)
-	Output(ctx context.Context, in *JobID, opts ...grpc.CallOption) (*JobOutput, error)
+	StreamOutput(ctx context.Context, in *JobID, opts ...grpc.CallOption) (grpc.ServerStreamingClient[JobOutput], error)
 }
 
 type jobManagerClient struct {
@@ -85,15 +85,24 @@ func (c *jobManagerClient) List(ctx context.Context, in *NilMessage, opts ...grp
 	return out, nil
 }
 
-func (c *jobManagerClient) Output(ctx context.Context, in *JobID, opts ...grpc.CallOption) (*JobOutput, error) {
+func (c *jobManagerClient) StreamOutput(ctx context.Context, in *JobID, opts ...grpc.CallOption) (grpc.ServerStreamingClient[JobOutput], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(JobOutput)
-	err := c.cc.Invoke(ctx, JobManager_Output_FullMethodName, in, out, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &JobManager_ServiceDesc.Streams[0], JobManager_StreamOutput_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
-	return out, nil
+	x := &grpc.GenericClientStream[JobID, JobOutput]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
 }
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type JobManager_StreamOutputClient = grpc.ServerStreamingClient[JobOutput]
 
 // JobManagerServer is the server API for JobManager service.
 // All implementations must embed UnimplementedJobManagerServer
@@ -103,7 +112,7 @@ type JobManagerServer interface {
 	Stop(context.Context, *JobID) (*NilMessage, error)
 	Query(context.Context, *JobID) (*JobStatus, error)
 	List(context.Context, *NilMessage) (*JobStatusList, error)
-	Output(context.Context, *JobID) (*JobOutput, error)
+	StreamOutput(*JobID, grpc.ServerStreamingServer[JobOutput]) error
 	mustEmbedUnimplementedJobManagerServer()
 }
 
@@ -126,8 +135,8 @@ func (UnimplementedJobManagerServer) Query(context.Context, *JobID) (*JobStatus,
 func (UnimplementedJobManagerServer) List(context.Context, *NilMessage) (*JobStatusList, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method List not implemented")
 }
-func (UnimplementedJobManagerServer) Output(context.Context, *JobID) (*JobOutput, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method Output not implemented")
+func (UnimplementedJobManagerServer) StreamOutput(*JobID, grpc.ServerStreamingServer[JobOutput]) error {
+	return status.Errorf(codes.Unimplemented, "method StreamOutput not implemented")
 }
 func (UnimplementedJobManagerServer) mustEmbedUnimplementedJobManagerServer() {}
 func (UnimplementedJobManagerServer) testEmbeddedByValue()                    {}
@@ -222,23 +231,16 @@ func _JobManager_List_Handler(srv interface{}, ctx context.Context, dec func(int
 	return interceptor(ctx, in, info, handler)
 }
 
-func _JobManager_Output_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(JobID)
-	if err := dec(in); err != nil {
-		return nil, err
+func _JobManager_StreamOutput_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(JobID)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
 	}
-	if interceptor == nil {
-		return srv.(JobManagerServer).Output(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: JobManager_Output_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(JobManagerServer).Output(ctx, req.(*JobID))
-	}
-	return interceptor(ctx, in, info, handler)
+	return srv.(JobManagerServer).StreamOutput(m, &grpc.GenericServerStream[JobID, JobOutput]{ServerStream: stream})
 }
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type JobManager_StreamOutputServer = grpc.ServerStreamingServer[JobOutput]
 
 // JobManager_ServiceDesc is the grpc.ServiceDesc for JobManager service.
 // It's only intended for direct use with grpc.RegisterService,
@@ -263,11 +265,13 @@ var JobManager_ServiceDesc = grpc.ServiceDesc{
 			MethodName: "List",
 			Handler:    _JobManager_List_Handler,
 		},
+	},
+	Streams: []grpc.StreamDesc{
 		{
-			MethodName: "Output",
-			Handler:    _JobManager_Output_Handler,
+			StreamName:    "StreamOutput",
+			Handler:       _JobManager_StreamOutput_Handler,
+			ServerStreams: true,
 		},
 	},
-	Streams:  []grpc.StreamDesc{},
 	Metadata: "linuxserver.proto",
 }

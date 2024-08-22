@@ -11,7 +11,7 @@ service JobManager {
 
   rpc List(NilMessage)                  returns (JobStatusList)   {}
 
-  rpc Output(JobID)			    returns (JobOutput) {} // stream没学
+  rpc StreamOutput(JobID)			    returns (stream JobOutput) {} // gRPC stream
 }
 
 message Job {
